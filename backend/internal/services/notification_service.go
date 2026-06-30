@@ -214,13 +214,15 @@ func (s *NotificationService) DispatchNotification(ctx context.Context, accessTo
 			return errors.New("image update payload is required")
 		}
 		logManagerDispatchNotificationInternal(ctx, target, payload.Kind)
-		return s.sendImageUpdateNotificationForTargetInternal(ctx, target, payload.ImageUpdate.ImageRef, &payload.ImageUpdate.UpdateInfo, models.NotificationEventImageUpdate)
+		_, err = s.sendImageUpdateNotificationForTargetInternal(ctx, target, payload.ImageUpdate.ImageRef, &payload.ImageUpdate.UpdateInfo, models.NotificationEventImageUpdate)
+		return err
 	case notificationdto.DispatchKindBatchImageUpdate:
 		if payload.BatchImageUpdate == nil {
 			return errors.New("batch image update payload is required")
 		}
 		logManagerDispatchNotificationInternal(ctx, target, payload.Kind)
-		return s.sendBatchImageUpdateNotificationForTargetInternal(ctx, target, payload.BatchImageUpdate.Updates)
+		_, err = s.sendBatchImageUpdateNotificationForTargetInternal(ctx, target, payload.BatchImageUpdate.Updates)
+		return err
 	case notificationdto.DispatchKindContainerUpdate:
 		if payload.ContainerUpdate == nil {
 			return errors.New("container update payload is required")
@@ -397,35 +399,42 @@ func (s *NotificationService) DeleteSettings(ctx context.Context, provider model
 	return nil
 }
 
-func (s *NotificationService) SendImageUpdateNotification(ctx context.Context, imageRef string, updateInfo *imageupdate.Response, eventType models.NotificationEventType) error {
+// SendImageUpdateNotification dispatches a single-image update notification and
+// returns the number of eligible providers it was delivered to (0 means no
+// provider has this event enabled, so callers must not mark the update notified).
+func (s *NotificationService) SendImageUpdateNotification(ctx context.Context, imageRef string, updateInfo *imageupdate.Response, eventType models.NotificationEventType) (int, error) {
 	if updateInfo == nil {
-		return errors.New("updateInfo is required")
+		return 0, errors.New("updateInfo is required")
 	}
 
 	if s.config != nil && s.config.AgentMode {
-		return s.dispatchNotificationToManagerInternal(ctx, notificationdto.DispatchRequest{
+		if err := s.dispatchNotificationToManagerInternal(ctx, notificationdto.DispatchRequest{
 			Kind: notificationdto.DispatchKindImageUpdate,
 			ImageUpdate: &notificationdto.DispatchImageUpdate{
 				ImageRef:   imageRef,
 				UpdateInfo: *updateInfo,
 			},
-		})
+		}); err != nil {
+			return 0, err
+		}
+		return 1, nil
 	}
 
 	target, err := s.resolveNotificationTargetInternal(ctx, "")
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	return s.sendImageUpdateNotificationForTargetInternal(ctx, target, imageRef, updateInfo, eventType)
 }
 
-func (s *NotificationService) sendImageUpdateNotificationForTargetInternal(ctx context.Context, target NotificationTarget, imageRef string, updateInfo *imageupdate.Response, eventType models.NotificationEventType) error {
+func (s *NotificationService) sendImageUpdateNotificationForTargetInternal(ctx context.Context, target NotificationTarget, imageRef string, updateInfo *imageupdate.Response, eventType models.NotificationEventType) (int, error) {
 	settings, err := s.GetAllSettings(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get notification settings: %w", err)
+		return 0, fmt.Errorf("failed to get notification settings: %w", err)
 	}
 
+	delivered := 0
 	var errors []string
 	for _, setting := range settings {
 		if !setting.Enabled {
@@ -464,6 +473,8 @@ func (s *NotificationService) sendImageUpdateNotificationForTargetInternal(ctx c
 			continue
 		}
 
+		delivered++
+
 		status := "success"
 		var errMsg *string
 		if sendErr != nil {
@@ -483,10 +494,10 @@ func (s *NotificationService) sendImageUpdateNotificationForTargetInternal(ctx c
 	}
 
 	if len(errors) > 0 {
-		return fmt.Errorf("notification errors: %s", strings.Join(errors, "; "))
+		return delivered, fmt.Errorf("notification errors: %s", strings.Join(errors, "; "))
 	}
 
-	return nil
+	return delivered, nil
 }
 
 // isEventEnabled checks if a specific event type is enabled in the config
@@ -1360,24 +1371,30 @@ func (s *NotificationService) logNotification(ctx context.Context, provider mode
 	}
 }
 
-func (s *NotificationService) SendBatchImageUpdateNotification(ctx context.Context, updates map[string]*imageupdate.Response) error {
+// SendBatchImageUpdateNotification dispatches a batched image-update notification
+// and returns the number of eligible providers it was delivered to (0 means no
+// provider has this event enabled, so callers must not mark the updates notified).
+func (s *NotificationService) SendBatchImageUpdateNotification(ctx context.Context, updates map[string]*imageupdate.Response) (int, error) {
 	updatesWithChanges := filterUpdatesWithChangesInternal(updates)
 	if len(updatesWithChanges) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	if s.config != nil && s.config.AgentMode {
-		return s.dispatchNotificationToManagerInternal(ctx, notificationdto.DispatchRequest{
+		if err := s.dispatchNotificationToManagerInternal(ctx, notificationdto.DispatchRequest{
 			Kind: notificationdto.DispatchKindBatchImageUpdate,
 			BatchImageUpdate: &notificationdto.DispatchBatchImageUpdate{
 				Updates: updatesWithChanges,
 			},
-		})
+		}); err != nil {
+			return 0, err
+		}
+		return 1, nil
 	}
 
 	target, err := s.resolveNotificationTargetInternal(ctx, "")
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	return s.sendBatchImageUpdateNotificationForTargetInternal(ctx, target, updatesWithChanges)
@@ -1393,18 +1410,19 @@ func filterUpdatesWithChangesInternal(updates map[string]*imageupdate.Response) 
 	return updatesWithChanges
 }
 
-func (s *NotificationService) sendBatchImageUpdateNotificationForTargetInternal(ctx context.Context, target NotificationTarget, updates map[string]*imageupdate.Response) error {
+func (s *NotificationService) sendBatchImageUpdateNotificationForTargetInternal(ctx context.Context, target NotificationTarget, updates map[string]*imageupdate.Response) (int, error) {
 	updatesWithChanges := filterUpdatesWithChangesInternal(updates)
 
 	if len(updatesWithChanges) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	settings, err := s.GetAllSettings(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get notification settings: %w", err)
+		return 0, fmt.Errorf("failed to get notification settings: %w", err)
 	}
 
+	delivered := 0
 	var errors []string
 	for _, setting := range settings {
 		if !setting.Enabled {
@@ -1421,6 +1439,8 @@ func (s *NotificationService) sendBatchImageUpdateNotificationForTargetInternal(
 			continue
 		}
 
+		delivered++
+
 		status, errMsg := collectNotificationSendResultInternal(&errors, setting.Provider, sendErr)
 
 		imageRefs := make([]string, 0, len(updatesWithChanges))
@@ -1436,10 +1456,10 @@ func (s *NotificationService) sendBatchImageUpdateNotificationForTargetInternal(
 	}
 
 	if len(errors) > 0 {
-		return fmt.Errorf("notification errors: %s", strings.Join(errors, "; "))
+		return delivered, fmt.Errorf("notification errors: %s", strings.Join(errors, "; "))
 	}
 
-	return nil
+	return delivered, nil
 }
 
 func (s *NotificationService) sendBatchDiscordNotification(ctx context.Context, environmentName string, updates map[string]*imageupdate.Response, config models.JSON) error {

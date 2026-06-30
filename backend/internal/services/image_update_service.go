@@ -251,10 +251,33 @@ func (s *ImageUpdateService) CheckImageUpdate(ctx context.Context, imageRef stri
 		slog.WarnContext(ctx, "Failed to save update result", "imageRef", imageRef, "error", saveErr.Error())
 	}
 
-	// Send notification if update is available
+	// Send notification if update is available. Mark the record notified only when
+	// it was actually delivered to a provider, so the scheduled batch check doesn't
+	// re-notify the same update (and so a "delivered to nobody" send never poisons
+	// the notification_sent flag). Prefer the snapshot's image ID — it is the same
+	// key saveUpdateResultWithSnapshotInternal stored the record under above.
 	if digestResult.HasUpdate && s.notificationService != nil {
-		if notifErr := s.notificationService.SendImageUpdateNotification(ctx, imageRef, digestResult, models.NotificationEventImageUpdate); notifErr != nil {
+		delivered, notifErr := s.notificationService.SendImageUpdateNotification(ctx, imageRef, digestResult, models.NotificationEventImageUpdate)
+		if notifErr != nil {
 			slog.WarnContext(ctx, "Failed to send update notification", "imageRef", imageRef, "error", notifErr.Error())
+		}
+		if delivered > 0 {
+			imageID := ""
+			if snapshot != nil {
+				imageID = snapshot.ImageID
+			}
+			if imageID == "" {
+				if resolved, idErr := s.getImageIDByRef(ctx, imageRef); idErr != nil {
+					slog.WarnContext(ctx, "Failed to resolve image ID to mark notified", "imageRef", imageRef, "error", idErr.Error())
+				} else {
+					imageID = resolved
+				}
+			}
+			if imageID != "" {
+				if markErr := s.MarkUpdatesAsNotified(ctx, []string{imageID}); markErr != nil {
+					slog.WarnContext(ctx, "Failed to mark update as notified", "imageRef", imageRef, "error", markErr.Error())
+				}
+			}
 		}
 	}
 
@@ -1326,8 +1349,13 @@ func (s *ImageUpdateService) sendBatchImageUpdateNotificationsInternal(ctx conte
 
 		slog.InfoContext(ctx, "Sending notifications for unnotified updates", "count", len(updatesToNotify))
 
-		if notifErr := s.notificationService.SendBatchImageUpdateNotification(notifCtx, updatesToNotify); notifErr != nil {
+		delivered, notifErr := s.notificationService.SendBatchImageUpdateNotification(notifCtx, updatesToNotify)
+		if notifErr != nil {
 			slog.WarnContext(ctx, "Failed to send batch update notification", "error", notifErr.Error())
+			return
+		}
+		if delivered == 0 {
+			slog.DebugContext(ctx, "No eligible notification providers for image updates; leaving records unnotified", "count", len(imageIDsToMark))
 			return
 		}
 		if markErr := s.MarkUpdatesAsNotified(notifCtx, imageIDsToMark); markErr != nil {

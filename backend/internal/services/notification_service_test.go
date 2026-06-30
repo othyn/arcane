@@ -228,8 +228,9 @@ func TestNotificationService_SendImageUpdateNotification_AgentModeDispatchesToMa
 		ManagerApiUrl: server.URL,
 	}, envSvc)
 
-	err := svc.SendImageUpdateNotification(ctx, "nginx:latest", newNotificationTestUpdateInfoInternal(), models.NotificationEventImageUpdate)
+	delivered, err := svc.SendImageUpdateNotification(ctx, "nginx:latest", newNotificationTestUpdateInfoInternal(), models.NotificationEventImageUpdate)
 	require.NoError(t, err)
+	require.EqualValues(t, 1, delivered)
 	require.EqualValues(t, 1, calls.Load())
 	require.Equal(t, notificationdto.DispatchKindImageUpdate, dispatched.Kind)
 	require.NotNil(t, dispatched.ImageUpdate)
@@ -246,7 +247,7 @@ func TestNotificationService_SendImageUpdateNotification_AgentModeRequiresUpdate
 		AgentMode: true,
 	}, envSvc)
 
-	err := svc.SendImageUpdateNotification(ctx, "nginx:latest", nil, models.NotificationEventImageUpdate)
+	_, err := svc.SendImageUpdateNotification(ctx, "nginx:latest", nil, models.NotificationEventImageUpdate)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "updateInfo is required")
 }
@@ -271,13 +272,14 @@ func TestNotificationService_SendBatchImageUpdateNotification_AgentModeSkipsNoOp
 	}, envSvc)
 
 	t.Run("empty updates", func(t *testing.T) {
-		err := svc.SendBatchImageUpdateNotification(ctx, map[string]*imageupdate.Response{})
+		delivered, err := svc.SendBatchImageUpdateNotification(ctx, map[string]*imageupdate.Response{})
 		require.NoError(t, err)
+		require.EqualValues(t, 0, delivered)
 		require.EqualValues(t, 0, calls.Load())
 	})
 
 	t.Run("no changed updates", func(t *testing.T) {
-		err := svc.SendBatchImageUpdateNotification(ctx, map[string]*imageupdate.Response{
+		delivered, err := svc.SendBatchImageUpdateNotification(ctx, map[string]*imageupdate.Response{
 			"nginx:latest": {
 				HasUpdate:     false,
 				CurrentDigest: "sha256:current",
@@ -286,6 +288,7 @@ func TestNotificationService_SendBatchImageUpdateNotification_AgentModeSkipsNoOp
 			"redis:latest": nil,
 		})
 		require.NoError(t, err)
+		require.EqualValues(t, 0, delivered)
 		require.EqualValues(t, 0, calls.Load())
 	})
 }
